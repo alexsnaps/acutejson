@@ -114,12 +114,14 @@ pub enum Status {
   NeedMore,
 }
 
-/// Errors emitted by [`Parser::feed`] on malformed JSON input.
+/// Errors returned by [`Parser::feed`] and [`Parser::finish`] on malformed input.
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
-  /// A byte that cannot appear at the current parse position was encountered.
+  /// A byte that is not valid at the current parse position was encountered.
+  /// The inner value is the offending byte.
   UnexpectedByte(u8),
-  /// The input stream ended while the document was still incomplete.
+  /// [`Parser::finish`] was called while the parser was still in a mid-parse
+  /// state (e.g. inside a string or keyword, or with unclosed containers).
   UnexpectedEof,
 }
 
@@ -181,10 +183,29 @@ impl Parser {
     }
   }
 
-  /// Feed the next chunk of JSON data.
+  /// Feed the next chunk of JSON bytes into the parser.
   ///
-  /// May be called repeatedly until [`Status::Done`] is returned.
-  /// Returns [`ParseError`] immediately on any malformed input.
+  /// The parser maintains full state between calls, so chunk boundaries may
+  /// fall anywhere — mid-string, mid-number, mid-escape-sequence, etc.
+  /// Registered callbacks fire as their respective paths are resolved.
+  ///
+  /// # Arguments
+  ///
+  /// * `chunk` — the next slice of raw JSON bytes. May be any length, including
+  ///   a single byte or the entire document at once.
+  ///
+  /// # Returns
+  ///
+  /// * [`Status::Done`] — every registered path has been matched; no further
+  ///   `feed` calls are needed (remaining bytes in the stream are not processed).
+  /// * [`Status::NeedMore`] — parsing is ongoing; call `feed` again with the
+  ///   next chunk, then call [`finish`](Self::finish) after the last one.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`ParseError::UnexpectedByte`] on the first byte that is not valid
+  /// at the current parse position. After an error the parser is in an undefined
+  /// state and must not be used further.
   pub fn feed(&mut self, chunk: &[u8]) -> Result<Status, ParseError> {
     if self.trie.total_paths > 0 && self.resolved >= self.trie.total_paths {
       return Ok(Status::Done);
@@ -626,15 +647,21 @@ impl Parser {
     Ok(Status::NeedMore)
   }
 
-  /// Signal end of the JSON stream.
+  /// Signal the end of the JSON stream.
   ///
-  /// Must be called after the last [`feed`](Self::feed) chunk. Returns:
-  /// - `Ok(())` if the stream ended in a valid terminal state (`AfterValue`
-  ///   with an empty stack, or already fully resolved).
-  /// - `Ok(())` if a top-level number was being accumulated — fires its
-  ///   callback with `is_complete = true`.
-  /// - `Err(ParseError::UnexpectedEof)` for any other mid-parse state
-  ///   (truncated string, keyword, unclosed container, etc.).
+  /// Must be called once, after the last [`feed`](Self::feed) chunk.
+  /// If a number value was still being accumulated (numbers have no
+  /// self-delimiting end byte in JSON), `finish` fires its callback with
+  /// `is_complete = true` before returning.
+  ///
+  /// Calling `finish` on an already-resolved parser (i.e. after
+  /// [`feed`](Self::feed) returned [`Status::Done`]) is a no-op and returns `Ok(())`.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`ParseError::UnexpectedEof`] if the stream ended in a
+  /// mid-parse state: inside a string, inside a keyword, or with unclosed
+  /// containers and no number pending.
   pub fn finish(&mut self) -> Result<(), ParseError> {
     if self.trie.total_paths > 0 && self.resolved >= self.trie.total_paths {
       return Ok(());
@@ -695,7 +722,10 @@ fn fmt_usize(n: usize, buf: &mut [u8; 20]) -> &str {
 // ── Builder::build ────────────────────────────────────────────────────────────
 
 impl Builder {
-  /// Consume the builder and produce a [`Parser`] ready to accept chunks.
+  /// Consumes the builder and produces a [`Parser`] ready to accept byte chunks.
+  ///
+  /// After building, call [`Parser::feed`] for each incoming chunk and
+  /// [`Parser::finish`] once after the last chunk.
   pub fn build(self) -> Parser {
     let total_paths = count_paths(&self.root);
     let mut nodes: Vec<FlatNode> = Vec::new();

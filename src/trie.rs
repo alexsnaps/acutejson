@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
-/// Errors that can occur when registering a JSON Pointer.
+/// Errors returned by [`Builder::register`] when a JSON Pointer is invalid.
 #[derive(Debug, PartialEq)]
 pub enum PointerError {
-  /// Pointer does not start with '/' (unless it's the empty string for root).
+  /// The pointer does not start with `'/'` (and is not the empty string `""`
+  /// that refers to the document root).
   MissingLeadingSlash,
-  /// Invalid escape sequence: '~' not followed by '0' or '1'.
+  /// A `~` escape in the pointer is not followed by `0` or `1`.
   InvalidEscape,
 }
 
@@ -112,12 +113,16 @@ pub(crate) fn decode_segment(segment: &str) -> Result<String, PointerError> {
   Ok(result)
 }
 
-/// Builder for constructing a `Parser` with registered JSON Pointer paths.
+/// Builder for constructing a [`Parser`](crate::Parser) with registered JSON Pointer paths.
+///
+/// Call [`register`](Self::register) for each path of interest, then
+/// [`build`](Self::build) to produce a [`Parser`](crate::Parser).
 pub struct Builder {
   pub(crate) root: TrieNode,
 }
 
 impl Builder {
+  /// Creates a new, empty builder with no registered paths.
   pub fn new() -> Self {
     Self {
       root: TrieNode::new(),
@@ -126,9 +131,27 @@ impl Builder {
 
   /// Registers a JSON Pointer path and the callback to invoke when its value is found.
   ///
-  /// The callback receives `(bytes: &[u8], is_complete: bool)`. It may be called
-  /// multiple times if the value spans chunk boundaries; `is_complete` is `true`
-  /// on the final (or only) call.
+  /// The callback signature is `fn(bytes: &[u8], is_complete: bool)`:
+  /// - For **string** values the callback may fire multiple times as chunks arrive.
+  ///   `is_complete` is `false` on intermediate calls and `true` on the final call
+  ///   (which delivers an empty slice after the closing `"`). Raw JSON escape
+  ///   sequences are forwarded as-is; decoding is the caller's responsibility.
+  /// - For **numbers, booleans, and `null`** the callback fires exactly once with
+  ///   `is_complete = true` and the full raw value bytes (e.g. `b"42"`, `b"true"`).
+  ///
+  /// Registering the same `pointer` twice overwrites the earlier callback.
+  ///
+  /// # Arguments
+  ///
+  /// * `pointer` — an RFC 6901 JSON Pointer such as `"/foo/bar"`,
+  ///   `"/items/0/name"`, or `""` for the document root.
+  ///   Use `~0` for a literal `~` and `~1` for a literal `/` in a key name.
+  /// * `callback` — closure invoked with each chunk of raw JSON bytes for the
+  ///   matched value.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`PointerError`] if `pointer` is not a valid RFC 6901 JSON Pointer.
   pub fn register(
     mut self,
     pointer: &str,
@@ -141,6 +164,7 @@ impl Builder {
 }
 
 impl Default for Builder {
+  /// Creates a new, empty builder. Equivalent to [`Builder::new`].
   fn default() -> Self {
     Self::new()
   }
