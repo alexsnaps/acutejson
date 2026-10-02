@@ -583,8 +583,9 @@ impl Parser {
                 str_state: Some(SkipStringState::Body),
               };
             }
+            b'\t' | b'\n' | b'\r' => {}
             0x00..=0x1F => return Err(ParseError::UnexpectedByte(b)),
-            _ => {} // commas, colons, whitespace, number chars, keyword chars
+            _ => {} // commas, colons, spaces, number chars, keyword chars
           },
           Some(SkipStringState::Body) => match b {
             b'"' => {
@@ -916,6 +917,55 @@ mod tests {
   fn whitespace_is_ignored() {
     assert_eq!(feed_once("/foo", b"  {  }  "), Ok(Status::NeedMore));
     assert_eq!(feed_once("/foo", b"\n[\n]\n"), Ok(Status::NeedMore));
+  }
+
+  #[test]
+  fn skipped_object_allows_whitespace() {
+    let (mut p, calls) = collecting_parser("/name");
+    let result = p.feed(b"{\n  \"other\": {\n    \"x\": 1\n  },\n  \"name\": \"bob\"\n}\n");
+    assert_eq!(result, Ok(Status::Done));
+    let c = calls.borrow();
+    assert!(c.last().map(|(_, done)| *done).unwrap_or(false));
+  }
+
+  #[test]
+  fn skipped_array_allows_whitespace() {
+    let (mut p, calls) = collecting_parser("/name");
+    let result = p.feed(b"{\n  \"list\": [\n    1,\n    2\n  ],\n  \"name\": \"z\"\n}");
+    assert_eq!(result, Ok(Status::Done));
+    let c = calls.borrow();
+    assert!(c.last().map(|(_, done)| *done).unwrap_or(false));
+  }
+
+  #[test]
+  fn skipped_container_allows_tabs_and_carriage_returns() {
+    assert_eq!(
+      feed_once(
+        "/name",
+        b"{\"other\":{\r\n\t\"x\":\t1\r\n},\"name\":\"bob\"}"
+      ),
+      Ok(Status::Done)
+    );
+  }
+
+  #[test]
+  fn skipped_container_whitespace_split_across_chunks() {
+    let (mut p, calls) = collecting_parser("/name");
+    // Chunk boundary lands inside the skipped subtree's whitespace.
+    assert_eq!(p.feed(b"{\"other\":{\n  \"x\""), Ok(Status::NeedMore));
+    assert_eq!(p.feed(b": 1\n  },\n"), Ok(Status::NeedMore));
+    assert_eq!(p.feed(b"  \"name\": \"bob\"\n}"), Ok(Status::Done));
+    let c = calls.borrow();
+    assert!(c.last().map(|(_, done)| *done).unwrap_or(false));
+  }
+
+  #[test]
+  fn skipped_container_rejects_raw_control_bytes() {
+    // Control characters other than whitespace stay invalid while skipping.
+    assert_eq!(
+      feed_once("/name", b"{\"other\":{\x01},\"name\":\"bob\"}"),
+      Err(ParseError::UnexpectedByte(0x01))
+    );
   }
 
   // ── Error cases ───────────────────────────────────────────────────────
